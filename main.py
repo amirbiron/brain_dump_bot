@@ -33,6 +33,7 @@ _bot_loop_ready = threading.Event()
 _bot_initialized = threading.Event()
 _bot_init_lock = threading.Lock()
 _bot_init_future: Optional[concurrent.futures.Future] = None
+_PROCESS_UPDATE_TIMEOUT_SECONDS = 8.0
 
 
 def _start_bot_loop() -> None:
@@ -173,8 +174,18 @@ def webhook():
         return {"status": "error", "message": "bot initialization failed"}, 503
 
     update = Update.de_json(json_data, bot.application.bot)
+    update_payload_keys = sorted(k for k in json_data.keys() if k != "update_id")
+    logger.debug("📨 התקבל עדכון %s (payload keys=%s)", update.update_id, update_payload_keys)
     process_future = _run_on_bot_loop(bot.application.process_update(update))
-    process_future.add_done_callback(_log_update_future_result)
+
+    try:
+        process_future.result(timeout=_PROCESS_UPDATE_TIMEOUT_SECONDS)
+    except concurrent.futures.TimeoutError:
+        logger.error("⏳ עיבוד העדכון חרג מהמגבלת זמן (%ss)", _PROCESS_UPDATE_TIMEOUT_SECONDS)
+        return {"status": "error", "message": "processing timeout"}, 504
+    except Exception:
+        logger.exception("❌ שגיאה בעיבוד עדכון שהגיע מה-webhook")
+        return {"status": "error", "message": "processing failed"}, 500
 
     return {"status": "ok"}, 200
 
@@ -251,16 +262,6 @@ def ensure_bot_initialized_sync(timeout: float = 30.0) -> bool:
     if result:
         _bot_initialized.set()
     return result
-
-
-def _log_update_future_result(future: concurrent.futures.Future) -> None:
-    """
-    רישום שגיאות שקרו במהלך עיבוד עדכון לאחר שה-webhook כבר השיב.
-    """
-    try:
-        future.result()
-    except Exception:
-        logger.exception("❌ שגיאה בעיבוד עדכון שהגיע מה-webhook")
 
 
 def run_polling():
