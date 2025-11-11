@@ -7,6 +7,7 @@ import asyncio
 import concurrent.futures
 import logging
 import threading
+import time
 from collections.abc import Coroutine
 from typing import Optional
 
@@ -33,6 +34,7 @@ _bot_loop_ready = threading.Event()
 _bot_initialized = threading.Event()
 _bot_init_lock = threading.Lock()
 _bot_init_future: Optional[concurrent.futures.Future] = None
+# מגבלת זמן רכה - משמשת להתרעות בלבד, לא לעצירת העיבוד
 _PROCESS_UPDATE_TIMEOUT_SECONDS = 8.0
 
 
@@ -71,6 +73,37 @@ def _run_on_bot_loop(coro: Coroutine) -> concurrent.futures.Future:
     if not _bot_loop:
         raise RuntimeError("לולאת האירועים של הבוט לא הופעלה")
     return asyncio.run_coroutine_threadsafe(coro, _bot_loop)
+
+
+def _consume_processed_update_future(
+    future: concurrent.futures.Future,
+    update_id: int,
+    started_at: float
+) -> tuple[bool, bool, float]:
+    """
+    מטפל בתוצאת future של עיבוד עדכון ומחזיר מידע על הצלחתו.
+
+    Returns:
+        (succeeded, cancelled, duration_seconds)
+    """
+    duration = time.perf_counter() - started_at
+
+    if future.cancelled():
+        logger.warning("⚠️ עיבוד עדכון %s בוטל לאחר %.2fs", update_id, duration)
+        return False, True, duration
+
+    try:
+        future.result()
+    except Exception:
+        logger.exception("❌ שגיאה בעיבוד עדכון %s (משך %.2fs)", update_id, duration)
+        return False, False, duration
+
+    if duration >= _PROCESS_UPDATE_TIMEOUT_SECONDS:
+        logger.warning("⌛ עדכון %s הושלם לאחר %.2fs (איטי מהרגיל)", update_id, duration)
+    else:
+        logger.debug("✅ עדכון %s הושלם ב-%.2fs", update_id, duration)
+
+    return True, False, duration
 
 
 def _on_init_future_done(future: concurrent.futures.Future) -> None:
@@ -176,18 +209,32 @@ def webhook():
     update = Update.de_json(json_data, bot.application.bot)
     update_payload_keys = sorted(k for k in json_data.keys() if k != "update_id")
     logger.debug("📨 התקבל עדכון %s (payload keys=%s)", update.update_id, update_payload_keys)
-    process_future = _run_on_bot_loop(bot.application.process_update(update))
+    started_at = time.perf_counter()
 
     try:
-        process_future.result(timeout=_PROCESS_UPDATE_TIMEOUT_SECONDS)
-    except concurrent.futures.TimeoutError:
-        logger.error("⏳ עיבוד העדכון חרג מהמגבלת זמן (%ss)", _PROCESS_UPDATE_TIMEOUT_SECONDS)
-        return {"status": "error", "message": "processing timeout"}, 504
+        process_future = _run_on_bot_loop(bot.application.process_update(update))
     except Exception:
-        logger.exception("❌ שגיאה בעיבוד עדכון שהגיע מה-webhook")
-        return {"status": "error", "message": "processing failed"}, 500
+        logger.exception("❌ שגיאה בתזמון עיבוד עדכון %s", update.update_id)
+        return {"status": "error", "message": "scheduling failed"}, 500
 
-    return {"status": "ok"}, 200
+    if process_future.done():
+        succeeded, cancelled, duration = _consume_processed_update_future(
+            process_future,
+            update.update_id,
+            started_at
+        )
+        if cancelled:
+            return {"status": "error", "message": "processing cancelled"}, 500
+        if not succeeded:
+            return {"status": "error", "message": "processing failed"}, 500
+        return {"status": "ok", "processing_time": round(duration, 3)}, 200
+
+    def _on_future_done(fut: concurrent.futures.Future) -> None:
+        _consume_processed_update_future(fut, update.update_id, started_at)
+
+    process_future.add_done_callback(_on_future_done)
+    logger.debug("⏱️ עדכון %s הועבר לעיבוד אסינכרוני", update.update_id)
+    return {"status": "accepted"}, 200
 
 
 async def setup_webhook() -> bool:
