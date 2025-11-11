@@ -54,8 +54,14 @@ class BrainDumpBot:
         Args:
             use_updater (bool): האם לאפשר יצירת Updater (נדרש עבור מצב polling).
         """
+        if not TELEGRAM_BOT_TOKEN:
+            raise RuntimeError("TELEGRAM_BOT_TOKEN לא מוגדר - לא ניתן להפעיל את הבוט")
+
         # התחברות ל-DB
-        await db.connect()
+        connected = await db.connect()
+        if not connected:
+            logger.error("❌ אתחול הבוט הופסק - חיבור ל-MongoDB נכשל")
+            raise RuntimeError("MongoDB connection failed - aborting bot setup")
         
         # יצירת application
         builder = Application.builder().token(TELEGRAM_BOT_TOKEN)

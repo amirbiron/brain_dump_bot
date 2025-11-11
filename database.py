@@ -8,11 +8,15 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 import logging
 from config import (
-    MONGODB_URI, 
-    MONGODB_DB_NAME, 
+    MONGODB_URI,
+    MONGODB_DB_NAME,
     THOUGHT_STATUS,
     CATEGORIES,
-    TOPICS
+    TOPICS,
+    MONGODB_SERVER_SELECTION_TIMEOUT_MS,
+    MONGODB_CONNECT_TIMEOUT_MS,
+    MONGODB_SOCKET_TIMEOUT_MS,
+    MONGODB_MAX_POOL_SIZE,
 )
 
 # הגדרת לוגר
@@ -39,20 +43,40 @@ class Database:
         """
         יצירת חיבור למונגו DB
         """
+        if self.client:
+            logger.debug("🔁 כבר מחוברים למונגו DB - דילוג על אתחול נוסף")
+            return True
+
+        if not MONGODB_URI:
+            logger.error("❌ MONGODB_URI לא מוגדר - לא ניתן להתחבר למונגו")
+            return False
+
         try:
-            self.client = AsyncIOMotorClient(MONGODB_URI)
+            self.client = AsyncIOMotorClient(
+                MONGODB_URI,
+                serverSelectionTimeoutMS=MONGODB_SERVER_SELECTION_TIMEOUT_MS,
+                connectTimeoutMS=MONGODB_CONNECT_TIMEOUT_MS,
+                socketTimeoutMS=MONGODB_SOCKET_TIMEOUT_MS,
+                maxPoolSize=MONGODB_MAX_POOL_SIZE,
+                retryWrites=True,
+            )
             self.db = self.client[MONGODB_DB_NAME]
+
+            # בדיקת בריאות בסיסית כדי לאתר שגיאות חיבור מיידית
+            await self.db.command("ping")
+
             self.thoughts_collection = self.db.thoughts
             self.users_collection = self.db.users
-            
+
             # יצירת אינדקסים
             await self._create_indexes()
-            
+
             logger.info("✅ התחברות למונגו DB הצליחה")
             return True
             
         except Exception as e:
             logger.error(f"❌ שגיאה בהתחברות למונגו: {e}")
+            await self.close()
             return False
     
     async def _create_indexes(self):
@@ -93,6 +117,11 @@ class Database:
         if self.client:
             self.client.close()
             logger.info("🔌 חיבור למונגו נסגר")
+
+        self.client = None
+        self.db = None
+        self.thoughts_collection = None
+        self.users_collection = None
     
     # ===== פעולות על מחשבות (Thoughts) =====
     
