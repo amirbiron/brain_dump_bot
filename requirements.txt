@@ -10,7 +10,7 @@ motor==3.3.2
 nltk==3.8.1
 
 # Web Server (for Render)
-flask==3.0.0
+flask[async]==3.0.0
 gunicorn==21.2.0
 
 # Environment Variables
