@@ -28,11 +28,13 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
-@app.before_serving
-def _initialize_bot_before_serving() -> None:
+@app.before_request
+def _initialize_bot_before_request() -> None:
     """
-    מבטיחים שהבוט יאותחל לאחר יצירת ה-worker של Gunicorn ולפני קבלת בקשות.
+    מבטיחים שהבוט יאותחל לאחר יצירת ה-worker של Gunicorn ולפני עיבוד בקשות.
     """
+    if _bot_initialized.is_set():
+        return
     if not (RENDER_EXTERNAL_URL and TELEGRAM_BOT_TOKEN):
         return
 
