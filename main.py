@@ -27,6 +27,20 @@ logger = logging.getLogger(__name__)
 # יצירת Flask app
 app = Flask(__name__)
 
+
+@app.before_first_request
+def _initialize_bot_on_first_request() -> None:
+    """
+    מבטיחים שהבוט יאותחל לאחר יצירת ה-worker של Gunicorn.
+    """
+    if not (RENDER_EXTERNAL_URL and TELEGRAM_BOT_TOKEN):
+        return
+
+    try:
+        ensure_bot_initialized_sync()
+    except Exception:
+        logger.exception("⚠️ אתחול הבוט נכשל בבקשה הראשונה - ניסיון נוסף יבוצע בבקשה הבאה")
+
 # ===== לולאת אירועים ייעודית לבוט (דרוש עבור Webhook) =====
 _bot_loop: Optional[asyncio.AbstractEventLoop] = None
 _bot_loop_thread: Optional[threading.Thread] = None
@@ -363,13 +377,6 @@ def main():
             port=PORT,
             debug=DEBUG_MODE
         )
-
-
-if RENDER_EXTERNAL_URL and TELEGRAM_BOT_TOKEN:
-    try:
-        ensure_bot_initialized_sync()
-    except Exception:
-        logger.exception("⚠️ אתחול מוקדם של הבוט נכשל - יבוצע ניסיון נוסף בבקשה הראשונה")
 
 
 if __name__ == '__main__':
