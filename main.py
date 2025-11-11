@@ -133,7 +133,7 @@ async def setup_webhook() -> bool:
     webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/{TELEGRAM_BOT_TOKEN}"
 
     try:
-        await bot.setup()
+        await bot.setup(use_updater=False)
 
         # ניקוי webhook קיים
         await bot.application.bot.delete_webhook(drop_pending_updates=True)
@@ -192,7 +192,7 @@ def run_polling():
     """
 
     async def main():
-        await bot.setup()
+        await bot.setup(use_updater=True)
 
         # הפעלת polling
         await bot.application.initialize()
