@@ -32,6 +32,7 @@ _bot_loop_thread: Optional[threading.Thread] = None
 _bot_loop_ready = threading.Event()
 _bot_initialized = threading.Event()
 _bot_init_lock = threading.Lock()
+_bot_init_future: Optional[concurrent.futures.Future] = None
 
 
 def _start_bot_loop() -> None:
@@ -71,6 +72,66 @@ def _run_on_bot_loop(coro: Coroutine) -> concurrent.futures.Future:
     return asyncio.run_coroutine_threadsafe(coro, _bot_loop)
 
 
+def _on_init_future_done(future: concurrent.futures.Future) -> None:
+    """
+    Callback שמופעל בסיום אתחול הבוט.
+    """
+    global _bot_init_future
+
+    try:
+        result = future.result()
+    except Exception:
+        logger.exception("❌ כשל באתחול הבוט (future callback)")
+        with _bot_init_lock:
+            if _bot_init_future is future:
+                _bot_init_future = None
+        return
+
+    if result:
+        _bot_initialized.set()
+    else:
+        logger.error("⚠️ אתחול הבוט החזיר False")
+
+    with _bot_init_lock:
+        if _bot_init_future is future:
+            _bot_init_future = None
+
+
+def _schedule_bot_initialization() -> Optional[concurrent.futures.Future]:
+    """
+    דואג שאתחול הבוט יתחיל (אם טרם קרה) ומחזיר future שמייצג את האתחול.
+    """
+    global _bot_init_future
+
+    if _bot_initialized.is_set():
+        return None
+
+    with _bot_init_lock:
+        if _bot_initialized.is_set():
+            return None
+
+        if _bot_init_future:
+            if not _bot_init_future.done():
+                return _bot_init_future
+
+            try:
+                previous_result = _bot_init_future.result()
+            except Exception:
+                logger.warning("🔄 ניסיון קודם לאתחול הבוט נכשל - מנסים שוב...")
+            else:
+                if previous_result:
+                    _bot_initialized.set()
+                    return None
+
+            _bot_init_future = None
+
+        logger.debug("🚀 מתחיל אתחול ראשוני של הבוט (Webhook mode)")
+        _start_bot_loop()
+        _bot_init_future = _run_on_bot_loop(setup_webhook())
+        _bot_init_future.add_done_callback(_on_init_future_done)
+        return _bot_init_future
+
+
 @app.route('/')
 def index():
     """
@@ -97,27 +158,25 @@ if not TELEGRAM_BOT_TOKEN:
 
 
 @app.route(WEBHOOK_PATH, methods=['POST'])
-async def webhook():
+def webhook():
     """
     Webhook endpoint לקבלת עדכונים מטלגרם
     """
     try:
         json_data = request.get_json(force=True)
-
-        init_ok = await ensure_bot_initialized()
-        if not init_ok:
-            logger.error("❌ הבוט לא אותחל - לא ניתן לעבד את העדכון")
-            return {"status": "error", "message": "bot initialization failed"}, 503
-
-        update = Update.de_json(json_data, bot.application.bot)
-        process_future = _run_on_bot_loop(bot.application.process_update(update))
-        await asyncio.wrap_future(process_future)
-
-        return {"status": "ok"}, 200
-
     except Exception as e:
         logger.exception("❌ שגיאה בעיבוד webhook: %s", e)
         return {"status": "error", "message": str(e)}, 500
+
+    if not ensure_bot_initialized_sync():
+        logger.error("❌ הבוט לא אותחל - לא ניתן לעבד את העדכון")
+        return {"status": "error", "message": "bot initialization failed"}, 503
+
+    update = Update.de_json(json_data, bot.application.bot)
+    process_future = _run_on_bot_loop(bot.application.process_update(update))
+    process_future.add_done_callback(_log_update_future_result)
+
+    return {"status": "ok"}, 200
 
 
 async def setup_webhook() -> bool:
@@ -163,26 +222,45 @@ async def ensure_bot_initialized() -> bool:
     """
     מבטיח שהבוט אותחל ורץ על לולאת אירועים נפרדת.
     """
-    if _bot_initialized.is_set():
-        return True
-
-    with _bot_init_lock:
-        if _bot_initialized.is_set():
-            return True
-
-        logger.debug("🚀 מתחיל אתחול ראשוני של הבוט (Webhook mode)")
-        _start_bot_loop()
-        future = _run_on_bot_loop(setup_webhook())
+    future = _schedule_bot_initialization()
+    if future is None:
+        return _bot_initialized.is_set()
 
     try:
         result = await asyncio.wrap_future(future)
     except Exception:
         logger.exception("❌ כשל באתחול הבוט (Webhook mode)")
         return False
+    return result
+
+
+def ensure_bot_initialized_sync(timeout: float = 30.0) -> bool:
+    """
+    גרסה סינכרונית של אתחול הבוט עבור הקשרים שאינם אסינכרוניים (כמו WSGI).
+    """
+    future = _schedule_bot_initialization()
+    if future is None:
+        return _bot_initialized.wait(timeout=timeout)
+
+    try:
+        result = future.result(timeout=timeout)
+    except Exception:
+        logger.exception("❌ כשל באתחול הבוט (sync)")
+        return False
 
     if result:
         _bot_initialized.set()
     return result
+
+
+def _log_update_future_result(future: concurrent.futures.Future) -> None:
+    """
+    רישום שגיאות שקרו במהלך עיבוד עדכון לאחר שה-webhook כבר השיב.
+    """
+    try:
+        future.result()
+    except Exception:
+        logger.exception("❌ שגיאה בעיבוד עדכון שהגיע מה-webhook")
 
 
 def run_polling():
@@ -227,7 +305,7 @@ def main():
     else:
         logger.info("🚀 מתחיל בוט במצב Render (webhook)")
 
-        init_ok = asyncio.run(ensure_bot_initialized())
+        init_ok = ensure_bot_initialized_sync()
         if not init_ok:
             raise RuntimeError("Failed to initialize bot for webhook mode")
 
@@ -241,7 +319,7 @@ def main():
 
 if RENDER_EXTERNAL_URL and TELEGRAM_BOT_TOKEN:
     try:
-        asyncio.run(ensure_bot_initialized())
+        ensure_bot_initialized_sync()
     except Exception:
         logger.exception("⚠️ אתחול מוקדם של הבוט נכשל - יבוצע ניסיון נוסף בבקשה הראשונה")
 
