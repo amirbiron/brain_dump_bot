@@ -47,20 +47,29 @@ class BrainDumpBot:
         # אחסון זמני של מחשבות במצב dump
         self.dump_sessions = {}
     
-    async def setup(self):
+    async def setup(self, use_updater: bool = False):
         """
-        הגדרת הבוט והתחברות לשירותים
+        הגדרת הבוט והתחברות לשירותים.
+
+        Args:
+            use_updater (bool): האם לאפשר יצירת Updater (נדרש עבור מצב polling).
         """
         # התחברות ל-DB
         await db.connect()
         
         # יצירת application
-        self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
+
+        if not use_updater:
+            builder.updater(None)
+
+        self.application = builder.build()
         
         # רישום handlers
         self._register_handlers()
-        
-        logger.info("✅ הבוט הוגדר בהצלחה")
+
+        mode = "Webhook mode (Updater disabled)" if not use_updater else "Polling mode (Updater enabled)"
+        logger.info("✅ הבוט הוגדר בהצלחה (%s)", mode)
     
     def _register_handlers(self):
         """
