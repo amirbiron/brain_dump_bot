@@ -67,6 +67,7 @@ class BrainDumpBot:
         
         # רישום handlers
         self._register_handlers()
+        self.application.add_error_handler(self.error_handler)
 
         mode = "Webhook mode (Updater disabled)" if not use_updater else "Polling mode (Updater enabled)"
         logger.info("✅ הבוט הוגדר בהצלחה (%s)", mode)
@@ -240,14 +241,19 @@ class BrainDumpBot:
         analysis = nlp.analyze(text)
         
         # שמירה ב-DB
-        thought_id = await db.save_thought(
-            user_id=user_id,
-            raw_text=text,
-            nlp_analysis=analysis
-        )
-        
-        # עדכון סטטיסטיקות
-        await db.update_user_stats(user_id)
+        try:
+            thought_id = await db.save_thought(
+                user_id=user_id,
+                raw_text=text,
+                nlp_analysis=analysis
+            )
+            await db.update_user_stats(user_id)
+        except Exception:
+            logger.exception("❌ שגיאה בשמירת מחשבה עבור משתמש %s", user_id)
+            await update.message.reply_text(
+                "😔 נתקלתי בשגיאה בזמן השמירה. נסו שוב בעוד רגע."
+            )
+            return
         
         # הודעת תגובה עם הניתוח
         summary = nlp.format_analysis_summary(analysis, text)
@@ -548,6 +554,21 @@ class BrainDumpBot:
             "\n".join(lines),
             parse_mode=ParseMode.MARKDOWN
         )
+
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
+        """
+        טיפול בשגיאות גלובליות של הבוט
+        """
+        logger.exception("❌ שגיאה לא מטופלת בבוט", exc_info=context.error)
+
+        message = getattr(update, "effective_message", None) if update else None
+        if message:
+            try:
+                await message.reply_text(
+                    "😬 קרתה שגיאה זמנית. נסו שוב מאוחר יותר."
+                )
+            except Exception:
+                logger.exception("❌ כשל בשליחת הודעת שגיאה למשתמש")
     
     def _build_dump_summary(self, count: int, category_summary: dict) -> str:
         """
