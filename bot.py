@@ -338,20 +338,57 @@ class BrainDumpBot:
         if not tasks:
             await update.message.reply_text(MESSAGES["archive_none"])
             return
-        # בניית רשימה ממוספרת
-        lines = [MESSAGES["archive_intro"]]
-        ids: list[str] = []
-        for i, t in enumerate(tasks, 1):
+        # בניית רשימה ממוספרת + כפתורי בחירה אינטראקטיביים
+        ids = []
+        titles = []
+        for t in tasks:
             txt = t.get("raw_text", "")
             if len(txt) > 60:
                 txt = txt[:57] + "..."
             emoji = nlp.get_category_emoji(t.get("nlp_analysis", {}).get("category", ""))
-            lines.append(f"{i}. {emoji} {txt}")
+            titles.append(f"{emoji} {txt}")
             ids.append(str(t.get("_id")))
-        await update.message.reply_text("\n".join(lines))
         # שמירת סשן וכניסה למצב בחירה
-        self.archive_sessions[user_id] = {"ids": ids}
+        self.archive_sessions[user_id] = {"ids": ids, "titles": titles, "selected": set()}
         self.user_states[user_id] = BOT_STATES["ARCHIVE_SELECT"]
+        text, keyboard = self._build_archive_selection_ui(user_id)
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard
+        )
+
+    def _build_archive_selection_ui(self, user_id: int):
+        """
+        בונה את טקסט הרשימה והמקשים עבור תצוגת בחירת ארכיון.
+        """
+        from math import ceil
+        session = self.archive_sessions.get(user_id, {})
+        titles = session.get("titles", [])
+        selected = session.get("selected", set())
+        lines = [MESSAGES["archive_intro"], ""]
+        for idx, title in enumerate(titles, start=1):
+            mark = "☑" if idx in selected else "⬜"
+            lines.append(f"{idx}. {mark} {title}")
+        # בניית מקשים: 4 בעמודה, ואז שורת פעולה
+        buttons = []
+        row = []
+        for idx in range(1, len(titles) + 1):
+            mark = "☑" if idx in selected else "⬜"
+            row.append(InlineKeyboardButton(f"{mark} {idx}", callback_data=f"archive_toggle_{idx}"))
+            if len(row) == 4:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+        # שורת פעולה
+        total_selected = len(selected)
+        confirm_text = f"✅ ארכב ({total_selected})" if total_selected > 0 else "✅ ארכב"
+        buttons.append([
+            InlineKeyboardButton(confirm_text, callback_data="archive_confirm"),
+            InlineKeyboardButton("❌ ביטול", callback_data="archive_cancel")
+        ])
+        return "\n".join(lines), InlineKeyboardMarkup(buttons)
     
     async def list_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -603,6 +640,64 @@ class BrainDumpBot:
         
         elif data.startswith("similar_"):
             await query.edit_message_text("🚧 חיפוש דומים בפיתוח...")
+        
+        # ===== ארכיון: לחצני בחירה =====
+        elif data.startswith("archive_toggle_"):
+            if self.user_states.get(user_id) != BOT_STATES["ARCHIVE_SELECT"]:
+                return
+            try:
+                idx = int(data.split("_")[-1])
+            except ValueError:
+                return
+            session = self.archive_sessions.get(user_id)
+            if not session or not (1 <= idx <= len(session.get("ids", []))):
+                return
+            selected = session.setdefault("selected", set())
+            if idx in selected:
+                selected.remove(idx)
+            else:
+                selected.add(idx)
+            text, keyboard = self._build_archive_selection_ui(user_id)
+            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        
+        elif data == "archive_confirm":
+            if self.user_states.get(user_id) != BOT_STATES["ARCHIVE_SELECT"]:
+                return
+            session = self.archive_sessions.get(user_id)
+            if not session:
+                return
+            selected_indices = sorted(session.get("selected", set()))
+            if not selected_indices:
+                # אין בחירה - השאר בעמוד והבלט שאין בחירה
+                text, keyboard = self._build_archive_selection_ui(user_id)
+                await query.edit_message_text(
+                    text + "\n\n_לא נבחרו משימות._",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=keyboard
+                )
+                return
+            chosen_ids = [session["ids"][i - 1] for i in selected_indices]
+            try:
+                updated = await db.archive_thoughts_by_ids(user_id, chosen_ids)
+            except Exception:
+                logger.exception("❌ שגיאה בארכוב משימות למשתמש %s", user_id)
+                await query.edit_message_text("😔 לא הצלחתי להעביר לארכיון. נסו שוב עוד רגע.")
+                return
+            remaining_tasks = await db.get_user_thoughts(user_id, category="משימות")
+            remaining_count = len(remaining_tasks)
+            parts = [MESSAGES["archive_done"].format(count=updated)]
+            parts.append(f"📁 נשארו פעילות: {remaining_count}")
+            await query.edit_message_text("\n".join(parts))
+            # איפוס מצב
+            self.user_states[user_id] = BOT_STATES["NORMAL"]
+            if user_id in self.archive_sessions:
+                del self.archive_sessions[user_id]
+        
+        elif data == "archive_cancel":
+            await query.edit_message_text("✅ בוטל. לא בוצעו שינויים.")
+            self.user_states[user_id] = BOT_STATES["NORMAL"]
+            if user_id in self.archive_sessions:
+                del self.archive_sessions[user_id]
     
     async def _show_recent_thoughts(self, query, user_id: int):
         """
