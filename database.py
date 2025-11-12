@@ -398,6 +398,65 @@ class Database:
         except Exception as e:
             logger.error(f"❌ שגיאה בעדכון סטטוס: {e}")
             return False
+
+    async def archive_thoughts_bulk(
+        self,
+        user_id: int,
+        thought_ids: List[str]
+    ) -> int:
+        """
+        ארכוב מרובה של מחשבות עבור משתמש נתון.
+
+        Args:
+            user_id: מזהה המשתמש
+            thought_ids: רשימת מזהי מחשבות לארכוב
+
+        Returns:
+            מספר המחשבות שעודכנו (עברו לסטטוס ARCHIVED)
+        """
+        if not thought_ids:
+            return 0
+
+        try:
+            from bson import ObjectId
+
+            object_ids = []
+            for thought_id in thought_ids:
+                try:
+                    object_ids.append(ObjectId(thought_id))
+                except Exception:
+                    # דילוג על מזהים לא תקינים
+                    logger.warning("⚠️ מזהה מחשבה לא תקין בארכוב מרובה: %s", thought_id)
+                    continue
+
+            if not object_ids:
+                return 0
+
+            result = await self.thoughts_collection.update_many(
+                {
+                    "_id": {"$in": object_ids},
+                    "user_id": user_id,
+                    "status": THOUGHT_STATUS["ACTIVE"],
+                },
+                {
+                    "$set": {
+                        "status": THOUGHT_STATUS["ARCHIVED"],
+                        "archived_at": datetime.utcnow(),
+                    }
+                },
+            )
+
+            logger.info(
+                "📦 נארכבו %d מחשבות (user_id=%s)",
+                result.modified_count,
+                user_id,
+            )
+
+            return result.modified_count
+
+        except Exception as e:
+            logger.error(f"❌ שגיאה בארכוב מרובה: {e}")
+            return 0
     
     async def delete_all_user_thoughts(self, user_id: int) -> int:
         """
