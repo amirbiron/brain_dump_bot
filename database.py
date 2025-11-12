@@ -398,43 +398,6 @@ class Database:
         except Exception as e:
             logger.error(f"❌ שגיאה בעדכון סטטוס: {e}")
             return False
-
-    async def archive_thoughts_by_ids(
-        self,
-        user_id: int,
-        thought_ids: List[str]
-    ) -> int:
-        """
-        ארכוב מספר מחשבות בבת אחת לפי מזהים
-        
-        Args:
-            user_id: מזהה המשתמש (לבקרה)
-            thought_ids: רשימת מזהי מחשבות (כ-strings)
-        
-        Returns:
-            מספר המחשבות שעודכנו
-        """
-        if not thought_ids:
-            return 0
-        try:
-            from bson import ObjectId
-            object_ids = []
-            for tid in thought_ids:
-                try:
-                    object_ids.append(ObjectId(tid))
-                except Exception:
-                    # דילוג על מזהה לא חוקי
-                    continue
-            if not object_ids:
-                return 0
-            result = await self.thoughts_collection.update_many(
-                {"_id": {"$in": object_ids}, "user_id": user_id},
-                {"$set": {"status": THOUGHT_STATUS["ARCHIVED"]}}
-            )
-            return result.modified_count
-        except Exception as e:
-            logger.error(f"❌ שגיאה בארכוב מחשבות: {e}")
-            return 0
     
     async def delete_all_user_thoughts(self, user_id: int) -> int:
         """
