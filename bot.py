@@ -46,6 +46,8 @@ class BrainDumpBot:
         self.user_states = {}
         # אחסון זמני של מחשבות במצב dump
         self.dump_sessions = {}
+        # אחסון זמני של רשימת משימות עבור מצב ארכיון
+        self.archive_sessions = {}
     
     async def setup(self, use_updater: bool = False):
         """
@@ -91,6 +93,7 @@ class BrainDumpBot:
         # פקודות ניהול מחשבות
         app.add_handler(CommandHandler("dump", self.dump_command))
         app.add_handler(CommandHandler("done", self.done_command))
+        app.add_handler(CommandHandler("archive", self.archive_command))
         
         # פקודות שליפה וחיפוש
         app.add_handler(CommandHandler("list", self.list_command))
@@ -241,6 +244,48 @@ class BrainDumpBot:
             # תגובה שקטה (סימן V)
             await update.message.reply_text(MESSAGES["dump_mode_active"])
             return
+
+        # מצב בחירת ארכיון - ציפייה למספרים
+        if self.user_states.get(user_id) == BOT_STATES["ARCHIVE_SELECT"]:
+            # שליפת רשימת המועמדים מהסשן
+            session = self.archive_sessions.get(user_id)
+            if not session:
+                # אם אין סשן, איפוס מצב
+                self.user_states[user_id] = BOT_STATES["NORMAL"]
+                await update.message.reply_text("הפעולה בוטלה. נסו שוב עם /archive")
+                return
+            # פרסינג מספרים (1-מבוסס)
+            import re
+            numbers = [int(n) for n in re.findall(r"\d+", text)]
+            numbers = sorted(set(numbers))
+            # סינון טווחים לא חוקיים
+            valid_indices = [n for n in numbers if 1 <= n <= len(session["ids"])]
+            if not valid_indices:
+                await update.message.reply_text(
+                    "לא זיהיתי מספרים תקינים. שלחו למשל: 1,3"
+                )
+                return
+            # מיפוי למזהים
+            chosen_ids = [session["ids"][i - 1] for i in valid_indices]
+            # עדכון ב-DB
+            try:
+                updated = await db.archive_thoughts_by_ids(user_id, chosen_ids)
+            except Exception:
+                logger.exception("❌ שגיאה בארכוב משימות למשתמש %s", user_id)
+                await update.message.reply_text("😔 לא הצלחתי להעביר לארכיון. נסו שוב עוד רגע.")
+                return
+            # כמה נשארו פעילות
+            remaining_tasks = await db.get_user_thoughts(user_id, category="משימות")
+            remaining_count = len(remaining_tasks)
+            # תשובה למשתמש
+            parts = [MESSAGES["archive_done"].format(count=updated)]
+            parts.append(f"📁 נשארו פעילות: {remaining_count}")
+            await update.message.reply_text("\n".join(parts))
+            # איפוס מצב הארכיון
+            self.user_states[user_id] = BOT_STATES["NORMAL"]
+            if user_id in self.archive_sessions:
+                del self.archive_sessions[user_id]
+            return
         
         # מצב רגיל - ניתוח ושמירה מיידית
         # ניתוח NLP
@@ -282,6 +327,31 @@ class BrainDumpBot:
         )
         
         logger.info(f"💭 מחשבה נשמרה למשתמש {user_id}: {analysis['category']}")
+
+    async def archive_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        פקודת /archive - הצגת משימות פעילות ובקשת בחירה
+        """
+        user_id = update.effective_user.id
+        # שליפת משימות פעילות (קטגוריה "משימות")
+        tasks = await db.get_user_thoughts(user_id, limit=20, category="משימות")
+        if not tasks:
+            await update.message.reply_text(MESSAGES["archive_none"])
+            return
+        # בניית רשימה ממוספרת
+        lines = [MESSAGES["archive_intro"]]
+        ids: list[str] = []
+        for i, t in enumerate(tasks, 1):
+            txt = t.get("raw_text", "")
+            if len(txt) > 60:
+                txt = txt[:57] + "..."
+            emoji = nlp.get_category_emoji(t.get("nlp_analysis", {}).get("category", ""))
+            lines.append(f"{i}. {emoji} {txt}")
+            ids.append(str(t.get("_id")))
+        await update.message.reply_text("\n".join(lines))
+        # שמירת סשן וכניסה למצב בחירה
+        self.archive_sessions[user_id] = {"ids": ids}
+        self.user_states[user_id] = BOT_STATES["ARCHIVE_SELECT"]
     
     async def list_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
