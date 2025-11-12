@@ -46,6 +46,8 @@ class BrainDumpBot:
         self.user_states = {}
         # אחסון זמני של מחשבות במצב dump
         self.dump_sessions = {}
+        # סשנים עבור ארכוב מרובה (בחירה מרובה)
+        self.bulk_archive_sessions = {}
     
     async def setup(self, use_updater: bool = False):
         """
@@ -359,9 +361,16 @@ class BrainDumpBot:
         if len(thoughts) > 10:
             lines.append(f"\n_ועוד {len(thoughts) - 10} מחשבות..._")
         
+        # כפתור לבחירת פריטים לארכוב
+        keyboard = [
+            [InlineKeyboardButton("✅ בחר פריטים לארכוב", callback_data="bulk_today_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await update.message.reply_text(
             "\n".join(lines),
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup
         )
     
     async def week_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -520,6 +529,25 @@ class BrainDumpBot:
             # הצגת כל המחשבות
             await self._show_recent_thoughts(query, user_id)
         
+        # ===== ארכוב מרובה - זרימה 4 =====
+        elif data == "bulk_today_start":
+            # אתחול סשן לבחירה מרובה עבור מחשבות היום
+            await self._start_bulk_archive_session(query, user_id)
+        
+        elif data.startswith("bulk_tog_"):
+            # החלפת מצב בחירה למחשבה לפי מזהה
+            thought_id = data.replace("bulk_tog_", "")
+            await self._toggle_bulk_selection(query, user_id, thought_id)
+        
+        elif data == "bulk_apply":
+            # ביצוע ארכוב לפריטים שנבחרו
+            await self._apply_bulk_archive(query, user_id)
+        
+        elif data == "bulk_cancel":
+            # ביטול הסשן
+            self.bulk_archive_sessions.pop(user_id, None)
+            await query.edit_message_text("✅ בוטל.")
+        
         elif data == "confirm_clear":
             # מחיקה מאושרת
             count = await db.delete_all_user_thoughts(user_id)
@@ -533,6 +561,127 @@ class BrainDumpBot:
         
         elif data.startswith("similar_"):
             await query.edit_message_text("🚧 חיפוש דומים בפיתוח...")
+
+    async def _start_bulk_archive_session(self, query, user_id: int):
+        """
+        אתחול סשן לבחירה מרובה של מחשבות לארכוב (היום)
+        """
+        # שליפת מחשבות היום (פעילות)
+        thoughts = await db.get_thoughts_by_date_range(user_id, days_back=1)
+        if not thoughts:
+            await query.edit_message_text("לא נרשמו מחשבות היום. 🤔")
+            return
+        
+        # בניית רשימת מחשבות לסשן
+        session_thoughts = []
+        preselected_ids = set()
+        for t in thoughts[:20]:  # מגבילים ל-20 לרוחב הודעה
+            tid = str(t.get("_id"))
+            text = t.get("raw_text", "").strip()
+            category = t.get("nlp_analysis", {}).get("category", "הרהורים")
+            if len(text) > 60:
+                text = text[:57] + "..."
+            session_thoughts.append({"id": tid, "text": text, "category": category})
+            # ברירת מחדל: לבחור פריטי "משימות"
+            if category == "משימות":
+                preselected_ids.add(tid)
+        
+        # שמירת סשן
+        self.bulk_archive_sessions[user_id] = {
+            "thoughts": session_thoughts,
+            "selected": preselected_ids,
+        }
+        
+        # הצגה ראשונית
+        text = self._build_bulk_archive_message(session_thoughts, preselected_ids)
+        keyboard = self._build_bulk_archive_keyboard(session_thoughts, preselected_ids)
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard,
+        )
+
+    def _build_bulk_archive_message(self, thoughts: list[dict], selected: set[str]) -> str:
+        """
+        בניית טקסט ההודעה לבחירה מרובה עם תיבות סימון
+        """
+        lines = ["בחר/י מחשבות לארכוב:\n"]
+        for item in thoughts:
+            mark = "☑️" if item["id"] in selected else "☐"
+            emoji = nlp.get_category_emoji(item.get("category", ""))
+            lines.append(f"{mark} {emoji} {item['text']}")
+        return "\n".join(lines)
+
+    def _build_bulk_archive_keyboard(self, thoughts: list[dict], selected: set[str]) -> InlineKeyboardMarkup:
+        """
+        בניית מקלדת כפתורי בחירה + פעולות
+        """
+        rows = []
+        # כפתור החלפה לכל פריט
+        for item in thoughts:
+            mark = "☑️" if item["id"] in selected else "☐"
+            label = item["text"]
+            if len(label) > 28:
+                label = label[:25] + "..."
+            rows.append([
+                InlineKeyboardButton(f"{mark} {label}", callback_data=f"bulk_tog_{item['id']}")
+            ])
+        
+        # שורת פעולות
+        apply_count = len(selected)
+        rows.append([
+            InlineKeyboardButton(f"📦 ארכב נבחרים ({apply_count})", callback_data="bulk_apply"),
+            InlineKeyboardButton("❌ ביטול", callback_data="bulk_cancel"),
+        ])
+        return InlineKeyboardMarkup(rows)
+
+    async def _toggle_bulk_selection(self, query, user_id: int, thought_id: str):
+        """
+        החלפת מצב בחירה של מחשבה בסשן הפעיל
+        """
+        session = self.bulk_archive_sessions.get(user_id)
+        if not session:
+            await query.answer("אין סשן פעיל")
+            return
+        
+        selected: set[str] = session["selected"]
+        if thought_id in selected:
+            selected.remove(thought_id)
+        else:
+            selected.add(thought_id)
+        
+        # רענון התצוגה
+        thoughts = session["thoughts"]
+        text = self._build_bulk_archive_message(thoughts, selected)
+        keyboard = self._build_bulk_archive_keyboard(thoughts, selected)
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard,
+        )
+
+    async def _apply_bulk_archive(self, query, user_id: int):
+        """
+        מבצע ארכוב מרובה עבור הבחירות בסשן
+        """
+        session = self.bulk_archive_sessions.get(user_id)
+        if not session:
+            await query.answer("אין סשן פעיל")
+            return
+        
+        selected_ids = list(session.get("selected", []))
+        if not selected_ids:
+            await query.answer("לא נבחרו פריטים")
+            return
+        
+        # ביצוע ארכוב ב-DB
+        count = await db.archive_thoughts_bulk(user_id, selected_ids)
+        await db.update_user_stats(user_id)
+        
+        # ניקוי סשן
+        self.bulk_archive_sessions.pop(user_id, None)
+        
+        await query.edit_message_text(f"✅ *{count}* מחשבות הועברו לארכיון!", parse_mode=ParseMode.MARKDOWN)
     
     async def _show_recent_thoughts(self, query, user_id: int):
         """
