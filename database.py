@@ -564,7 +564,11 @@ class Database:
                     "joined_at": datetime.utcnow(),
                     "settings": {
                         "dump_mode": False,
-                        "notifications": True
+                        "notifications": True,
+                        "weekly_review": {
+                            "last_prompted_at": None,
+                            "last_completed_at": None,
+                        },
                     },
                     "stats": {
                         "total_thoughts": 0,
@@ -642,6 +646,45 @@ class Database:
         except Exception as e:
             logger.error(f"❌ שגיאה בשליפת סטטיסטיקות: {e}")
             return {}
+
+    # ===== Weekly Review helpers on users =====
+    async def list_all_user_ids(self) -> list[int]:
+        """
+        שליפה מהירה של כל מזהי המשתמשים הרשומים במערכת.
+        """
+        try:
+            cursor = self.users_collection.find({}, {"user_id": 1, "_id": 0})
+            users = await cursor.to_list(None)
+            return [int(u.get("user_id")) for u in users if u.get("user_id") is not None]
+        except Exception as e:
+            logger.error(f"❌ שגיאה בשליפת רשימת משתמשים: {e}")
+            return []
+
+    async def set_weekly_review_prompted(self, user_id: int) -> None:
+        """
+        עדכון timestamp של שליחת תזכורת סקירה שבועית למשתמש.
+        """
+        try:
+            await self.users_collection.update_one(
+                {"user_id": user_id},
+                {"$set": {"settings.weekly_review.last_prompted_at": datetime.utcnow()}},
+                upsert=False,
+            )
+        except Exception as e:
+            logger.error(f"❌ שגיאה בעדכון שעת תזכורת סקירה: {e}")
+
+    async def set_weekly_review_completed(self, user_id: int) -> None:
+        """
+        עדכון timestamp של השלמת סקירה שבועית למשתמש.
+        """
+        try:
+            await self.users_collection.update_one(
+                {"user_id": user_id},
+                {"$set": {"settings.weekly_review.last_completed_at": datetime.utcnow()}},
+                upsert=False,
+            )
+        except Exception as e:
+            logger.error(f"❌ שגיאה בעדכון השלמת סקירה: {e}")
 
 
 # יצירת אובייקט גלובלי
