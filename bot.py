@@ -13,6 +13,7 @@ from telegram.ext import (
     filters
 )
 from telegram.constants import ParseMode
+from telegram.helpers import escape_markdown
 from datetime import datetime, timedelta
 import logging
 
@@ -348,7 +349,7 @@ class BrainDumpBot:
         lines = [f"📅 *היום רשמת {len(thoughts)} מחשבות:*\n"]
         
         for i, thought in enumerate(thoughts[:10], 1):  # מקסימום 10
-            text = thought["raw_text"]
+            text = (thought.get("raw_text") or "").strip()
             category = thought["nlp_analysis"]["category"]
             emoji = nlp.get_category_emoji(category)
             
@@ -356,7 +357,8 @@ class BrainDumpBot:
             if len(text) > 50:
                 text = text[:47] + "..."
             
-            lines.append(f"{i}. {emoji} {text}")
+            safe_text = self._escape_markdown(text)
+            lines.append(f"{i}. {emoji} {safe_text}")
         
         if len(thoughts) > 10:
             lines.append(f"\n_ועוד {len(thoughts) - 10} מחשבות..._")
@@ -417,7 +419,8 @@ class BrainDumpBot:
             )
             return
         
-        search_term = " ".join(context.args)
+        search_term = " ".join(context.args).strip()
+        escaped_search_term = self._escape_markdown(search_term)
         
         # חיפוש
         results = await db.search_thoughts(user_id, search_term)
@@ -429,17 +432,18 @@ class BrainDumpBot:
             return
         
         # בניית הודעה
-        lines = [f"🔍 *נמצאו {len(results)} תוצאות עבור '{search_term}':*\n"]
+        lines = [f"🔍 *נמצאו {len(results)} תוצאות עבור '{escaped_search_term}':*\n"]
         
         for i, thought in enumerate(results[:8], 1):
-            text = thought["raw_text"]
+            text = (thought.get("raw_text") or "").strip()
             category = thought["nlp_analysis"]["category"]
             emoji = nlp.get_category_emoji(category)
             
             if len(text) > 60:
                 text = text[:57] + "..."
             
-            lines.append(f"{i}. {emoji} {text}")
+            safe_text = self._escape_markdown(text)
+            lines.append(f"{i}. {emoji} {safe_text}")
         
         if len(results) > 8:
             lines.append(f"\n_ועוד {len(results) - 8} תוצאות..._")
@@ -609,7 +613,8 @@ class BrainDumpBot:
         for item in thoughts:
             mark = "☑️" if item["id"] in selected else "☐"
             emoji = nlp.get_category_emoji(item.get("category", ""))
-            lines.append(f"{mark} {emoji} {item['text']}")
+            display_text = self._escape_markdown(item.get("text", ""))
+            lines.append(f"{mark} {emoji} {display_text}")
         return "\n".join(lines)
 
     def _build_bulk_archive_keyboard(self, thoughts: list[dict], selected: set[str]) -> InlineKeyboardMarkup:
@@ -696,14 +701,15 @@ class BrainDumpBot:
         lines = ["📝 *המחשבות האחרונות:*\n"]
         
         for i, thought in enumerate(thoughts, 1):
-            text = thought["raw_text"]
+            text = (thought.get("raw_text") or "").strip()
             if len(text) > 40:
                 text = text[:37] + "..."
             
             category = thought["nlp_analysis"]["category"]
             emoji = nlp.get_category_emoji(category)
             
-            lines.append(f"{i}. {emoji} {text}")
+            safe_text = self._escape_markdown(text)
+            lines.append(f"{i}. {emoji} {safe_text}")
         
         await query.edit_message_text(
             "\n".join(lines),
@@ -744,6 +750,14 @@ class BrainDumpBot:
             lines.append(f"  {emoji} {category}: {num}")
         
         return "\n".join(lines)
+
+    def _escape_markdown(self, text: str) -> str:
+        """
+        איסוף טקסט של משתמשים לפני שליחה במצב Markdown
+        """
+        if not text:
+            return ""
+        return escape_markdown(text, version=1)
 
 
 # יצירת אובייקט גלובלי
