@@ -83,8 +83,13 @@ class BrainDumpBot:
         # יצירת application
         builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
 
+        # ב-PTB v20 הייתה מתודת updater() לבקרת ה-Updater; ב-v21 הוסרה.
         if not use_updater:
-            builder.updater(None)
+            try:
+                builder.updater(None)  # v20.x
+            except AttributeError:
+                # v21+: אין Updater בבילדר; מצב webhook לא דורש כלום כאן
+                pass
 
         self.application = builder.build()
         
