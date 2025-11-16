@@ -1,6 +1,5 @@
-# Telegram Bot
-python-telegram-bot==20.7
-python-telegram-bot[webhooks]==20.7
+# Telegram Bot (PTB 21.x fixes weakref issue on Py 3.13)
+python-telegram-bot[webhooks]==21.6
 
 # Database
 pymongo==4.6.1
