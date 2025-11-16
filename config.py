@@ -5,6 +5,7 @@
 
 import os
 from dotenv import load_dotenv
+from typing import Optional
 
 # טעינת משתני סביבה
 load_dotenv()
@@ -152,6 +153,8 @@ MESSAGES = {
 /done - סיום מצב שפיכה + סיכום
 /list - רשימת כל הקטגוריות
 /today - מה רשמתם היום
+/weekly_review - סקירה שבועית ידנית
+/review - קיצור ל-/weekly_review
 /search <מילה> - חיפוש חופשי
 /export - ייצוא לקובץ
 /help - עזרה מלאה
@@ -197,6 +200,10 @@ MESSAGES = {
 /archive - צפייה בפריטים בארכיון
 /search <מילה> - חיפוש חופשי בכל המחשבות
 
+*סקירה שבועית:*
+/weekly_review או /review - התחלת סקירה שבועית ידנית
+⏰ תזמון אוטומטי: שישי 16:00 וראשון 08:00 (Asia/Jerusalem)
+
 *פקודות ניהול:*
 /stats - סטטיסטיקה אישית
 /export - ייצוא המידע לקובץ
@@ -236,3 +243,22 @@ TIMEZONE = "Asia/Jerusalem"
 
 # לוג
 DEBUG_MODE = os.getenv("DEBUG", "False").lower() == "true"
+
+# ===== סקירה שבועית (Weekly Review) =====
+# אפשרות להפעיל/לכבות ולשלוט בזמנים דרך משתני סביבה
+WEEKLY_REVIEW_ENABLED = os.getenv("WEEKLY_REVIEW_ENABLED", "true").lower() == "true"
+
+# ברירת מחדל: שישי 16:00 וראשון 08:00
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+WEEKLY_REVIEW_FRIDAY_HOUR = _int_env("WEEKLY_REVIEW_FRIDAY_HOUR", 16)
+WEEKLY_REVIEW_FRIDAY_MINUTE = _int_env("WEEKLY_REVIEW_FRIDAY_MINUTE", 0)
+WEEKLY_REVIEW_SUNDAY_HOUR = _int_env("WEEKLY_REVIEW_SUNDAY_HOUR", 8)
+WEEKLY_REVIEW_SUNDAY_MINUTE = _int_env("WEEKLY_REVIEW_SUNDAY_MINUTE", 0)
+
+# חלון מניעת כפילויות (בשעות) בין טריגרים אוטומטיים
+WEEKLY_REVIEW_REPROMPT_COOLDOWN_HOURS = _int_env("WEEKLY_REVIEW_REPROMPT_COOLDOWN_HOURS", 36)

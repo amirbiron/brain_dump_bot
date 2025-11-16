@@ -283,6 +283,8 @@ async def setup_webhook() -> bool:
         # אתחול והפעלת ה-Application
         await bot.application.initialize()
         await bot.application.start()
+        # הפעלת מתזמנים (APScheduler) לאחר התחלת ה-application
+        bot.start_schedulers()
         logger.info("🤖 הבוט פעיל ומוכן לעבודה!")
 
         return True
@@ -340,6 +342,8 @@ def run_polling():
         await bot.application.initialize()
         await bot.application.start()
         await bot.application.updater.start_polling()
+        # Scheduler במצב פיתוח
+        bot.start_schedulers()
 
         logger.info("🤖 הבוט רץ במצב polling (פיתוח מקומי)")
 

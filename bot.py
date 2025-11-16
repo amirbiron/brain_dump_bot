@@ -15,6 +15,9 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from telegram.helpers import escape_markdown
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 import logging
 
 from config import (
@@ -24,6 +27,13 @@ from config import (
     CATEGORIES,
     TOPICS,
     THOUGHT_STATUS,
+    TIMEZONE,
+    WEEKLY_REVIEW_ENABLED,
+    WEEKLY_REVIEW_FRIDAY_HOUR,
+    WEEKLY_REVIEW_FRIDAY_MINUTE,
+    WEEKLY_REVIEW_SUNDAY_HOUR,
+    WEEKLY_REVIEW_SUNDAY_MINUTE,
+    WEEKLY_REVIEW_REPROMPT_COOLDOWN_HOURS,
 )
 from database import db
 from nlp_analyzer import nlp
@@ -50,6 +60,9 @@ class BrainDumpBot:
         self.dump_sessions = {}
         # סשנים עבור ארכוב מרובה (בחירה מרובה)
         self.bulk_archive_sessions = {}
+        # סשן סקירה שבועית לכל משתמש
+        self.review_sessions: dict[int, dict] = {}
+        self.scheduler: AsyncIOScheduler | None = None
     
     async def setup(self, use_updater: bool = False):
         """
@@ -103,6 +116,9 @@ class BrainDumpBot:
         app.add_handler(CommandHandler("week", self.week_command))
         app.add_handler(CommandHandler("archive", self.archive_command))
         app.add_handler(CommandHandler("search", self.search_command))
+        # סקירה שבועית - ידני
+        app.add_handler(CommandHandler("weekly_review", self.weekly_review_command))
+        app.add_handler(CommandHandler("review", self.weekly_review_command))
         
         # פקודות נוספות
         app.add_handler(CommandHandler("stats", self.stats_command))
@@ -119,6 +135,87 @@ class BrainDumpBot:
         ))
         
         logger.info("✅ כל ה-handlers נרשמו")
+
+    def start_schedulers(self):
+        """הפעלת מתזמנים (APScheduler) לטריגרים אוטומטיים"""
+        if not WEEKLY_REVIEW_ENABLED:
+            logger.info("⏸️ Weekly review scheduling disabled via config")
+            return
+        if self.scheduler:
+            # למניעת אתחול כפול
+            if not self.scheduler.running:
+                self.scheduler.start()
+            return
+
+        tz = ZoneInfo(TIMEZONE)
+        self.scheduler = AsyncIOScheduler(timezone=tz)
+
+        # שישי 16:00
+        fri_trigger = CronTrigger(day_of_week='fri', hour=WEEKLY_REVIEW_FRIDAY_HOUR, minute=WEEKLY_REVIEW_FRIDAY_MINUTE, timezone=tz)
+        self.scheduler.add_job(self._scheduled_weekly_review_prompt, fri_trigger, id="weekly_review_fri")
+
+        # ראשון 08:00
+        sun_trigger = CronTrigger(day_of_week='sun', hour=WEEKLY_REVIEW_SUNDAY_HOUR, minute=WEEKLY_REVIEW_SUNDAY_MINUTE, timezone=tz)
+        self.scheduler.add_job(self._scheduled_weekly_review_prompt, sun_trigger, id="weekly_review_sun")
+
+        self.scheduler.start()
+        logger.info("⏰ APScheduler התחיל - סקירה שבועית תישלח אוטומטית")
+
+    async def _scheduled_weekly_review_prompt(self):
+        """שליחת הודעת פתיחה של סקירה שבועית לכל המשתמשים הפעילים"""
+        try:
+            user_ids = await db.list_all_user_ids()
+        except Exception:
+            logger.exception("❌ כשל בשליפת משתמשים לטריגר סקירה")
+            return
+
+        if not user_ids:
+            logger.info("ℹ️ אין משתמשים לשלוח להם סקירה שבועית")
+            return
+
+        tz = ZoneInfo(TIMEZONE)
+        now = datetime.now(tz=tz)
+        sent = 0
+        for uid in user_ids:
+            try:
+                # מניעת כפילויות: אם נשלחה תזכורת לאחרונה (חלון cooldown), דלג
+                user = await self._get_user_doc(uid)
+                last_prompt = None
+                if user:
+                    last_prompt = (((user.get("settings") or {}).get("weekly_review") or {}).get("last_prompted_at"))
+                if last_prompt:
+                    if last_prompt.tzinfo is None:
+                        last_prompt = last_prompt.replace(tzinfo=ZoneInfo("UTC"))
+                    hours_since = (now - last_prompt.astimezone(tz)).total_seconds() / 3600.0
+                    if hours_since < WEEKLY_REVIEW_REPROMPT_COOLDOWN_HOURS:
+                        continue
+
+                keyboard = [
+                    [InlineKeyboardButton("בוא נתחיל! 🚀", callback_data="review_start")],
+                    [InlineKeyboardButton("אולי מאוחר יותר ⏰", callback_data="review_later")],
+                ]
+                text = (
+                    "🗓️ *שבוע חדש מתחיל!*\n\n"
+                    "מוכנים לסקירה קצרה של המחשבות מהשבוע האחרון?\n"
+                    "נעבור ונחליט מה להשאיר ומה לארכב."
+                )
+                await self.application.bot.send_message(
+                    chat_id=uid,
+                    text=text,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                await db.set_weekly_review_prompted(uid)
+                sent += 1
+            except Exception:
+                logger.exception("❌ כשל בשליחת תזכורת סקירה למשתמש %s", uid)
+        logger.info("📣 נשלחו %d תזכורות סקירה שבועית", sent)
+
+    async def _get_user_doc(self, user_id: int) -> dict:
+        try:
+            return await db.users_collection.find_one({"user_id": user_id})
+        except Exception:
+            return {}
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -496,6 +593,48 @@ class BrainDumpBot:
             "\n".join(lines),
             parse_mode=ParseMode.MARKDOWN
         )
+
+    async def weekly_review_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        פקודת /weekly_review או /review - התחלת סקירה שבועית ידנית
+        """
+        user_id = update.effective_user.id
+
+        thoughts = await db.get_thoughts_by_date_range(user_id, days_back=7)
+        if not thoughts:
+            await update.message.reply_text(
+                "לא נמצאו מחשבות מהשבוע האחרון.\nהמשך לכתוב ונדבר שבוע הבא! 😊"
+            )
+            return
+
+        # שמירת סשן סקירה בסיסי (רשימת מזהים וסדר)
+        items = []
+        for t in thoughts:
+            items.append({
+                "id": str(t.get("_id")),
+                "text": (t.get("raw_text") or "").strip(),
+                "created_at": t.get("created_at"),
+                "category": t.get("nlp_analysis", {}).get("category", "")
+            })
+
+        self.review_sessions[user_id] = {
+            "items": items,
+            "index": 0,
+            "kept": 0,
+            "archived": 0,
+        }
+
+        keyboard = [
+            [InlineKeyboardButton("בוא נתחיל! 🚀", callback_data="review_start")],
+            [InlineKeyboardButton("אולי מאוחר יותר ⏰", callback_data="review_later")],
+        ]
+        await update.message.reply_text(
+            f"🗓️ *שבוע חדש מתחיל!*\n\n"
+            f"השבוע שעבר רשמת *{len(items)}* מחשבות.\n"
+            f"בוא/י נעבור עליהן ונבחר מה להשאיר לשבוע הבא.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
     
     async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -621,6 +760,21 @@ class BrainDumpBot:
         
         elif data.startswith("similar_"):
             await query.edit_message_text("🚧 חיפוש דומים בפיתוח...")
+
+        # ===== סקירה שבועית - זרימה =====
+        elif data == "review_later":
+            await query.edit_message_text("⏰ אין בעיה, נזכיר בהמשך.")
+        elif data == "review_start":
+            await self._review_show_current(query, user_id)
+        elif data.startswith("review_keep_"):
+            # שמירה: לא משנים סטטוס
+            await self._review_handle_decision(query, user_id, action="keep", thought_id=data.replace("review_keep_", ""))
+        elif data.startswith("review_archive_"):
+            await self._review_handle_decision(query, user_id, action="archive", thought_id=data.replace("review_archive_", ""))
+        elif data == "review_skip":
+            await self._review_handle_decision(query, user_id, action="skip")
+        elif data == "review_finish":
+            await self._review_finish(query, user_id)
 
     async def _start_bulk_archive_session(self, query, user_id: int, days_back: int = 1):
         """
@@ -860,6 +1014,128 @@ class BrainDumpBot:
         if not text:
             return ""
         return escape_markdown(text, version=1)
+
+    # ===== Weekly Review helpers =====
+    async def _review_show_current(self, query, user_id: int):
+        session = self.review_sessions.get(user_id)
+        if not session or not session.get("items"):
+            await query.edit_message_text("אין מחשבות לסקירה כרגע.")
+            return
+
+        idx = session.get("index", 0)
+        items = session["items"]
+        if idx >= len(items):
+            await self._review_finish(query, user_id)
+            return
+
+        item = items[idx]
+        text = item.get("text", "")
+        if len(text) > 140:
+            text = text[:137] + "..."
+        safe_text = self._escape_markdown(text)
+
+        created_at = item.get("created_at")
+        ago_str = ""
+        if isinstance(created_at, datetime):
+            # חישוב זמן שחלף
+            now = datetime.now(tz=ZoneInfo(TIMEZONE))
+            created_naive = created_at
+            # created_at מה-DB לרוב naive ב-UTC
+            if created_naive.tzinfo is None:
+                created_naive = created_naive.replace(tzinfo=ZoneInfo("UTC"))
+            delta = now - created_naive.astimezone(ZoneInfo(TIMEZONE))
+            days = delta.days
+            if days <= 0:
+                ago_str = "נרשם: היום"
+            elif days == 1:
+                ago_str = "נרשם: אתמול"
+            else:
+                ago_str = f"נרשם: לפני {days} ימים"
+
+        emoji = nlp.get_category_emoji(item.get("category", ""))
+
+        lines = [
+            f"{emoji} *סקירה שבועית*",
+            "",
+            safe_text,
+        ]
+        if ago_str:
+            lines.append(ago_str)
+
+        keyboard = [
+            [
+                InlineKeyboardButton("השאר ✅", callback_data=f"review_keep_{item['id']}"),
+                InlineKeyboardButton("ארכב 📦", callback_data=f"review_archive_{item['id']}")
+            ],
+            [
+                InlineKeyboardButton("דלג ➡️", callback_data="review_skip"),
+                InlineKeyboardButton("סיים עכשיו", callback_data="review_finish"),
+            ],
+        ]
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    async def _review_handle_decision(self, query, user_id: int, action: str, thought_id: str | None = None):
+        session = self.review_sessions.get(user_id)
+        if not session:
+            await query.answer("אין סקירה פעילה")
+            return
+        idx = session.get("index", 0)
+        items = session.get("items", [])
+        if idx >= len(items):
+            await self._review_finish(query, user_id)
+            return
+
+        current = items[idx]
+        # ודא התאמה מזהה כאשר מדובר בפעולה ספציפית
+        if thought_id and current.get("id") != thought_id:
+            # אם לא תואם, מציגים הנוכחי ללא שינוי
+            await self._review_show_current(query, user_id)
+            return
+
+        if action == "archive":
+            await db.update_thought_status(current["id"], THOUGHT_STATUS["ARCHIVED"])
+            session["archived"] = session.get("archived", 0) + 1
+        elif action == "keep":
+            session["kept"] = session.get("kept", 0) + 1
+        # skip לא משנה מונים
+
+        # מעבר לפריט הבא
+        session["index"] = idx + 1
+
+        if session["index"] >= len(items):
+            await self._review_finish(query, user_id)
+        else:
+            await self._review_show_current(query, user_id)
+
+    async def _review_finish(self, query, user_id: int):
+        session = self.review_sessions.pop(user_id, None)
+        if not session:
+            await query.edit_message_text("✅ סקירה הושלמה!")
+            return
+
+        kept = session.get("kept", 0)
+        archived = session.get("archived", 0)
+        total = kept + archived + (len(session.get("items", [])) - session.get("index", 0))
+
+        lines = [
+            "✅ *סקירה הושלמה!*\n",
+            "📊 התוצאות:",
+            f"• נשארו: {kept}",
+            f"• ארכבו: {archived}",
+            "",
+            "💡 המחשבות שארכבת זמינות דרך /archive או /search",
+            "מוכן/ה לשבוע חדש! 🚀",
+        ]
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.MARKDOWN,
+        )
 
 
 # יצירת אובייקט גלובלי
