@@ -37,6 +37,13 @@ from config import (
 )
 from database import db
 from nlp_analyzer import nlp
+from activity_reporter import create_reporter
+
+reporter = create_reporter(
+    mongodb_uri="mongodb+srv://mumin:M43M2TFgLfGvhBwY@muminai.tm6x81b.mongodb.net/?retryWrites=true&w=majority&appName=muminAI",
+    service_id="srv-d49loev5r7bs739s60vg",
+    service_name="brain-dump-bot"
+)
 
 # הגדרת לוגר
 logging.basicConfig(
@@ -227,6 +234,7 @@ class BrainDumpBot:
         פקודת /start - הודעת פתיחה
         """
         user = update.effective_user
+        reporter.report_activity(user.id)
         
         # יצירה/שליפת משתמש ב-DB
         user_data = {
@@ -247,6 +255,7 @@ class BrainDumpBot:
         """
         פקודת /help - עזרה
         """
+        reporter.report_activity(update.effective_user.id)
         await update.message.reply_text(
             MESSAGES["help_text"],
             parse_mode=ParseMode.MARKDOWN
@@ -257,6 +266,7 @@ class BrainDumpBot:
         פקודת /dump - כניסה למצב "שפוך הכול"
         """
         user_id = update.effective_user.id
+        reporter.report_activity(user_id)
         
         # הפעלת מצב dump
         self.user_states[user_id] = BOT_STATES["DUMP_MODE"]
@@ -274,6 +284,7 @@ class BrainDumpBot:
         פקודת /done - סיום מצב dump וסיכום
         """
         user_id = update.effective_user.id
+        reporter.report_activity(user_id)
         
         # בדיקה אם המשתמש במצב dump
         if self.user_states.get(user_id) != BOT_STATES["DUMP_MODE"]:
@@ -338,6 +349,7 @@ class BrainDumpBot:
         טיפול בהודעות טקסט רגילות
         """
         user_id = update.effective_user.id
+        reporter.report_activity(user_id)
         text = update.message.text
         
         # בדיקה אם המשתמש במצב dump
@@ -395,6 +407,7 @@ class BrainDumpBot:
         פקודת /list או /topics - הצגת סיכום קטגוריות ונושאים
         """
         user_id = update.effective_user.id
+        reporter.report_activity(user_id)
         
         # שליפת סיכומים
         category_summary = await db.get_category_summary(user_id)
@@ -442,6 +455,7 @@ class BrainDumpBot:
         פקודת /today - מה נרשם היום
         """
         user_id = update.effective_user.id
+        reporter.report_activity(user_id)
         
         thoughts = await db.get_thoughts_by_date_range(user_id, days_back=1)
         
@@ -487,6 +501,7 @@ class BrainDumpBot:
         פקודת /week - מה נרשם השבוע
         """
         user_id = update.effective_user.id
+        reporter.report_activity(user_id)
         
         thoughts = await db.get_thoughts_by_date_range(user_id, days_back=7)
         
@@ -531,6 +546,7 @@ class BrainDumpBot:
         פקודת /archive - הצגת מחשבות בארכיון
         """
         user_id = update.effective_user.id
+        reporter.report_activity(user_id)
         thoughts = await db.get_user_thoughts(user_id, limit=10, status=THOUGHT_STATUS["ARCHIVED"])
         
         if not thoughts:
@@ -557,6 +573,7 @@ class BrainDumpBot:
         פקודת /search - חיפוש מחשבות
         """
         user_id = update.effective_user.id
+        reporter.report_activity(user_id)
         
         # קבלת מונח החיפוש
         if not context.args:
@@ -604,6 +621,7 @@ class BrainDumpBot:
         פקודת /weekly_review או /review - התחלת סקירה שבועית ידנית
         """
         user_id = update.effective_user.id
+        reporter.report_activity(user_id)
 
         thoughts = await db.get_thoughts_by_date_range(user_id, days_back=7)
         if not thoughts:
@@ -646,6 +664,7 @@ class BrainDumpBot:
         פקודת /stats - סטטיסטיקות אישיות
         """
         user_id = update.effective_user.id
+        reporter.report_activity(user_id)
         
         stats = await db.get_user_stats(user_id)
         
@@ -682,6 +701,7 @@ class BrainDumpBot:
         """
         פקודת /export - ייצוא מחשבות (בסיסי)
         """
+        reporter.report_activity(update.effective_user.id)
         await update.message.reply_text(
             "🚧 הפיצ'ר של ייצוא עדיין בפיתוח!\n"
             "בקרוב תוכלו לייצא את כל המחשבות ל-TXT/CSV 📄"
@@ -691,6 +711,7 @@ class BrainDumpBot:
         """
         פקודת /clear - מחיקת כל המחשבות (עם אישור)
         """
+        reporter.report_activity(update.effective_user.id)
         keyboard = [
             [
                 InlineKeyboardButton("✅ כן, מחק הכל", callback_data="confirm_clear"),
@@ -715,6 +736,7 @@ class BrainDumpBot:
         await query.answer()
         
         user_id = query.from_user.id
+        reporter.report_activity(update.effective_user.id)
         data = query.data
         
         if data == "show_all":
