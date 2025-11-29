@@ -571,28 +571,41 @@ class BrainDumpBot:
         
         # בניית הודעה בפורמט זהה ל-/today
         lines = [f"📆 *השבוע רשמת {len(thoughts)} מחשבות:*\n"]
+        display_thoughts = thoughts[:10]
+        item_buttons: list[list[InlineKeyboardButton]] = []
         
-        for i, thought in enumerate(thoughts[:10], 1):  # מקסימום 10
-            text = (thought.get("raw_text") or "").strip()
+        for i, thought in enumerate(display_thoughts, 1):  # מקסימום 10
+            raw_text = (thought.get("raw_text") or "").strip()
+            text = raw_text
             category = thought["nlp_analysis"]["category"]
             emoji = nlp.get_category_emoji(category)
+            thought_id = str(thought.get("_id"))
             
             if len(text) > 50:
                 text = text[:47] + "..."
             
             safe_text = self._escape_markdown(text)
             lines.append(f"{i}. {emoji} {safe_text}")
+            
+            preview_label = self._build_thought_preview_button_label(i, raw_text)
+            item_buttons.append([
+                InlineKeyboardButton(
+                    preview_label,
+                    callback_data=f"view_thought_{thought_id}"
+                )
+            ])
         
         if len(thoughts) > 10:
             lines.append(f"\n_ועוד {len(thoughts) - 10} מחשבות..._")
         
+        lines.append("\n💡 *לחיצה על כפתור הפריט תפתח את המחשבה המלאה.*")
+        
         # כפתורים לבחירת פריטים לארכוב/מחיקה
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ בחר פריטים לארכוב", callback_data="bulk_week_start"),
-                InlineKeyboardButton("🗑️ מחק פריטים", callback_data="bulk_week_delete_start"),
-            ]
+        bulk_row = [
+            InlineKeyboardButton("✅ בחר פריטים לארכוב", callback_data="bulk_week_start"),
+            InlineKeyboardButton("🗑️ מחק פריטים", callback_data="bulk_week_delete_start"),
         ]
+        keyboard = item_buttons + [bulk_row]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
