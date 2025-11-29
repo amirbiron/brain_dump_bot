@@ -228,6 +228,40 @@ class Database:
         except Exception as e:
             logger.error(f"❌ שגיאה בשליפת מחשבות: {e}")
             return []
+
+    async def get_thought_by_id(
+        self,
+        user_id: int,
+        thought_id: str,
+        include_archived: bool = True
+    ) -> Optional[Dict]:
+        """
+        שליפת מחשבה בודדת לפי מזהה, כולל וידוא שייכות למשתמש.
+        """
+        try:
+            from bson import ObjectId
+
+            object_id = ObjectId(thought_id)
+        except Exception:
+            logger.warning("⚠️ ניסיון לגשת למזהה מחשבה לא תקין: %s", thought_id)
+            return None
+
+        status_filter: Dict[str, Any] = {"$ne": THOUGHT_STATUS["DELETED"]}
+        if not include_archived:
+            status_filter = THOUGHT_STATUS["ACTIVE"]
+
+        try:
+            thought = await self.thoughts_collection.find_one(
+                {
+                    "_id": object_id,
+                    "user_id": user_id,
+                    "status": status_filter,
+                }
+            )
+            return thought
+        except Exception as e:
+            logger.error(f"❌ שגיאה בשליפת מחשבה לפי מזהה: {e}")
+            return None
     
     async def search_thoughts(
         self,

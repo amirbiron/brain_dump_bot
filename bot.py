@@ -465,11 +465,15 @@ class BrainDumpBot:
         
         # בניית הודעה
         lines = [f"📅 *היום רשמת {len(thoughts)} מחשבות:*\n"]
+        display_thoughts = thoughts[:10]
+        item_buttons: list[list[InlineKeyboardButton]] = []
         
-        for i, thought in enumerate(thoughts[:10], 1):  # מקסימום 10
-            text = (thought.get("raw_text") or "").strip()
+        for i, thought in enumerate(display_thoughts, 1):  # מקסימום 10
+            raw_text = (thought.get("raw_text") or "").strip()
+            text = raw_text
             category = thought["nlp_analysis"]["category"]
             emoji = nlp.get_category_emoji(category)
+            thought_id = str(thought.get("_id"))
             
             # קיצור טקסט ארוך
             if len(text) > 50:
@@ -477,23 +481,79 @@ class BrainDumpBot:
             
             safe_text = self._escape_markdown(text)
             lines.append(f"{i}. {emoji} {safe_text}")
+            
+            preview_label = self._build_thought_preview_button_label(i, raw_text)
+            item_buttons.append([
+                InlineKeyboardButton(
+                    preview_label,
+                    callback_data=f"view_thought_{thought_id}"
+                )
+            ])
         
         if len(thoughts) > 10:
             lines.append(f"\n_ועוד {len(thoughts) - 10} מחשבות..._")
         
+        lines.append("\n💡 *לחיצה על כפתור הפריט תפתח את המחשבה המלאה.*")
+        
         # כפתורים לבחירת פריטים לארכוב/מחיקה
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ בחר פריטים לארכוב", callback_data="bulk_today_start"),
-                InlineKeyboardButton("🗑️ מחק פריטים", callback_data="bulk_today_delete_start"),
-            ]
+        bulk_row = [
+            InlineKeyboardButton("✅ בחר פריטים לארכוב", callback_data="bulk_today_start"),
+            InlineKeyboardButton("🗑️ מחק פריטים", callback_data="bulk_today_delete_start"),
         ]
+        keyboard = item_buttons + [bulk_row]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
             "\n".join(lines),
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=reply_markup
+        )
+
+    def _build_thought_preview_button_label(self, index: int, text: str) -> str:
+        """
+        יוצר תווית קצרה לכפתור פתיחת מחשבה.
+        """
+        preview = (text or "").replace("\n", " ").strip()
+        if len(preview) > 28:
+            preview = preview[:25] + "..."
+        if not preview:
+            preview = "מחשבה ללא טקסט"
+        return f"{index}. {preview}"
+
+    async def _send_thought_details(self, query, user_id: int, thought_id: str):
+        """
+        מציג את המחשבה המלאה בהודעה נפרדת.
+        """
+        thought = await db.get_thought_by_id(user_id, thought_id)
+        if not thought:
+            await query.answer("הפריט לא זמין יותר.", show_alert=True)
+            return
+
+        text = (thought.get("raw_text") or "").strip()
+        safe_text = self._escape_markdown(text)
+        category = thought.get("nlp_analysis", {}).get("category", "")
+        emoji = nlp.get_category_emoji(category)
+
+        created_at = thought.get("created_at")
+        created_str = ""
+        if isinstance(created_at, datetime):
+            local_dt = created_at
+            if local_dt.tzinfo is None:
+                local_dt = local_dt.replace(tzinfo=ZoneInfo("UTC"))
+            local_dt = local_dt.astimezone(ZoneInfo(TIMEZONE))
+            created_str = local_dt.strftime("%d/%m/%Y %H:%M")
+
+        lines = [
+            f"{emoji} *מחשבה מלאה*",
+            "",
+            safe_text or "_(אין טקסט להצגה)_",
+        ]
+        if created_str:
+            lines.extend(["", f"_נוצר ב-{created_str}_"])
+
+        await query.message.reply_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.MARKDOWN
         )
     
     async def week_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -742,6 +802,9 @@ class BrainDumpBot:
         if data == "show_all":
             # הצגת כל המחשבות
             await self._show_recent_thoughts(query, user_id)
+        elif data.startswith("view_thought_"):
+            thought_id = data.replace("view_thought_", "")
+            await self._send_thought_details(query, user_id, thought_id)
         
         # ===== ארכוב מרובה - זרימה 4 =====
         elif data == "bulk_today_start":
