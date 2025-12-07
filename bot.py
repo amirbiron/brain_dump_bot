@@ -202,14 +202,17 @@ class BrainDumpBot:
                     if hours_since < WEEKLY_REVIEW_REPROMPT_COOLDOWN_HOURS:
                         continue
 
+                items = await self._ensure_review_session(uid, refresh=True)
+                items_count = len(items)
+
                 keyboard = [
                     [InlineKeyboardButton("בוא נתחיל! 🚀", callback_data="review_start")],
                     [InlineKeyboardButton("אולי מאוחר יותר ⏰", callback_data="review_later")],
                 ]
                 text = (
                     "🗓️ *שבוע חדש מתחיל!*\n\n"
-                    "מוכנים לסקירה קצרה של המחשבות מהשבוע האחרון?\n"
-                    "נעבור ונחליט מה להשאיר ומה לארכב."
+                    f"השבוע שעבר רשמת *{items_count}* מחשבות.\n"
+                    "בוא/י נעבור עליהן ונבחר מה להשאיר ומה לארכב."
                 )
                 await self.application.bot.send_message(
                     chat_id=uid,
@@ -696,29 +699,12 @@ class BrainDumpBot:
         user_id = update.effective_user.id
         reporter.report_activity(user_id)
 
-        thoughts = await db.get_thoughts_by_date_range(user_id, days_back=7)
-        if not thoughts:
+        items = await self._ensure_review_session(user_id, refresh=True)
+        if not items:
             await update.message.reply_text(
                 "לא נמצאו מחשבות מהשבוע האחרון.\nהמשך לכתוב ונדבר שבוע הבא! 😊"
             )
             return
-
-        # שמירת סשן סקירה בסיסי (רשימת מזהים וסדר)
-        items = []
-        for t in thoughts:
-            items.append({
-                "id": str(t.get("_id")),
-                "text": (t.get("raw_text") or "").strip(),
-                "created_at": t.get("created_at"),
-                "category": t.get("nlp_analysis", {}).get("category", "")
-            })
-
-        self.review_sessions[user_id] = {
-            "items": items,
-            "index": 0,
-            "kept": 0,
-            "archived": 0,
-        }
 
         keyboard = [
             [InlineKeyboardButton("בוא נתחיל! 🚀", callback_data="review_start")],
@@ -1118,12 +1104,45 @@ class BrainDumpBot:
             return ""
         return escape_markdown(text, version=1)
 
+    async def _ensure_review_session(self, user_id: int, refresh: bool = False) -> list[dict]:
+        """
+        בונה או מאפס סשן סקירה שבועית עבור המשתמש ומחזיר את הפריטים.
+        """
+        session = self.review_sessions.get(user_id)
+        if session and session.get("items") and not refresh:
+            return session["items"]
+
+        thoughts = await db.get_thoughts_by_date_range(user_id, days_back=7)
+        if not thoughts:
+            self.review_sessions.pop(user_id, None)
+            return []
+
+        items: list[dict] = []
+        for thought in thoughts:
+            items.append({
+                "id": str(thought.get("_id")),
+                "text": (thought.get("raw_text") or "").strip(),
+                "created_at": thought.get("created_at"),
+                "category": thought.get("nlp_analysis", {}).get("category", "")
+            })
+
+        self.review_sessions[user_id] = {
+            "items": items,
+            "index": 0,
+            "kept": 0,
+            "archived": 0,
+        }
+        return items
+
     # ===== Weekly Review helpers =====
     async def _review_show_current(self, query, user_id: int):
         session = self.review_sessions.get(user_id)
         if not session or not session.get("items"):
-            await query.edit_message_text("אין מחשבות לסקירה כרגע.")
-            return
+            items = await self._ensure_review_session(user_id, refresh=True)
+            session = self.review_sessions.get(user_id)
+            if not items or not session:
+                await query.edit_message_text("לא נמצאו מחשבות מהשבוע האחרון. תוסיפו כמה ונחזור לזה! 😊")
+                return
 
         idx = session.get("index", 0)
         items = session["items"]
